@@ -1,20 +1,22 @@
 import numpy as np
 
-def getXY():
-    input_length = 128
+def getXY(input_length):
+
 
 
     encoded_tokens = np.load('encoded_tokens.npy')
 
-    inputs = encoded_tokens.shape[0]//input_length
+    inputs = encoded_tokens.shape[0]//(input_length + 1)
 
-    X = np.reshape(encoded_tokens[:inputs*input_length], (-1, input_length))
-    encoded_tokens = np.roll(encoded_tokens, -1)
-    Y = np.reshape(encoded_tokens[:inputs*input_length], (-1, input_length))
+    data = np.reshape(encoded_tokens[:inputs*(input_length + 1)], (-1, (input_length + 1)))
+    data = data.astype(np.int32)
+    X = data[:, :-1]
+    Y = data[:, 1:]
+
     return X, Y
 
-def getTestTrain(testpct):
-    X, Y = getXY()
+def getTestTrain(input_length, testpct=0.02):
+    X, Y = getXY(input_length)
 
     p = np.random.permutation(X.shape[0])
     X = X[p]

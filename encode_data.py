@@ -22,6 +22,8 @@ for textfile in files:
      
     with codecs.open(textfile, "r", "utf-8") as f:
         text = f.read()
+    text = text.replace("\r", "")
+    text = text.replace("\n", " ")
     tokens = tokenizer.tokenize(text)
     encoded_tokens = tokenizer.convert_tokens_to_ids(tokens)
     print(textfile)
