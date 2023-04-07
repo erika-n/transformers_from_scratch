@@ -18,6 +18,8 @@ class MyMultiHeadAttention(layers.Layer):
         self.wv = layers.Dense(self.embedding_dim)
         self.ff = layers.Dense(self.embedding_dim)
         self.num_heads = num_heads
+        self.w = None
+        self.z = None
  
     def split_heads(self, e):
 
@@ -29,19 +31,19 @@ class MyMultiHeadAttention(layers.Layer):
         k = self.split_heads(self.wk(x))
         v = self.split_heads(self.wv(x))
 
-        w = (tf.matmul(q, tf.transpose(k, perm=[0, 1, 3, 2])))/math.sqrt(int(self.embedding_dim/self.num_heads)) # w dim: [batch_size, heads, input_length, input_length]
+        self.w = (tf.matmul(q, tf.transpose(k, perm=[0, 1, 3, 2])))/math.sqrt(int(self.embedding_dim/self.num_heads)) # w dim: [batch_size, heads, input_length, input_length]
     
         # masked attention
         if use_causal_mask:
             mask = tf.experimental.numpy.triu(tf.ones((1, 1, x.shape[1], x.shape[1])), 1)*-10.0e10
-            w = w + mask
-        w = tf.nn.softmax(w)
+            self.w = self.w + mask
+        self.w = tf.nn.softmax(self.w)
 
-        z = w @ v
+        self.z = self.w @ v
     
-        z = tf.reshape(z, (-1, x.shape[1], self.embedding_dim))
-        z = self.ff(z)
-        return z
+        self.z = tf.reshape(self.z, (-1, x.shape[1], self.embedding_dim))
+        self.z = self.ff(self.z + x)
+        return self.z
 
 
 
@@ -65,7 +67,7 @@ class TransformerBlock(layers.Layer):
         ffn_output = self.ffn(out1)
         ffn_output = self.dropout2(ffn_output)
         return self.layernorm2(out1 + ffn_output)
-
+        return attention_output
 
 class TokenAndPositionEmbedding(layers.Layer):
     def __init__(self, maxlen, vocab_size, embed_dim):
@@ -84,27 +86,29 @@ hparams = {
     "vocab_size": 50257, # from tokenizer  
     "maxlen" : 80,  # Max sequence size
     "embed_dim" : 256,  # Embedding size for each token
-    "num_heads" : 1,  # Number of attention heads
-    "num_layers": 1,
+    "num_heads" : 2,  # Number of attention heads
+    "num_layers": 2,
     "feed_forward_dim": 256  # Hidden layer size in feed forward network inside transformer
 }
 
 batch_size = 128
 
-vocab_size = hparams["vocab_size"]
-maxlen = hparams["maxlen"]
-embed_dim = hparams["embed_dim"]
-num_heads = hparams["num_heads"]
-num_layers = hparams["num_layers"]
-feed_forward_dim = hparams["feed_forward_dim"]
 
-model_name = f"test_h{num_heads}l{num_layers}emb{embed_dim}"
+model_name = f"test_h{hparams['num_heads']}l{hparams['num_layers']}emb{hparams['embed_dim']}"
 model_folder = "models/" + model_name
 Path(model_folder).mkdir(parents=True, exist_ok=True)
 with codecs.open (model_folder + "/params.json", "w", "utf-8") as f:
     f.write(json.dumps(hparams))
 
-def create_model():
+def create_model(hparams):
+    vocab_size = hparams["vocab_size"]
+    maxlen = hparams["maxlen"]
+    embed_dim = hparams["embed_dim"]
+    num_heads = hparams["num_heads"]
+    num_layers = hparams["num_layers"]
+    feed_forward_dim = hparams["feed_forward_dim"]
+
+
     inputs = layers.Input(shape=(maxlen,), dtype=tf.int32)
     embedding_layer = TokenAndPositionEmbedding(maxlen, vocab_size, embed_dim)
     x = embedding_layer(inputs)
@@ -157,7 +161,7 @@ class TextGenerator(keras.callbacks.Callback):
         return np.random.choice(indices, p=preds)
 
 
-    def on_epoch_end(self, epoch, logs=None):
+    def generate(self):
         start_tokens = [_ for _ in self.start_tokens]
         if (epoch + 1) % self.print_every != 0:
             return
@@ -179,27 +183,33 @@ class TextGenerator(keras.callbacks.Callback):
             tokens_generated.append(sample_token)
             start_tokens.append(sample_token)
             num_tokens_generated = len(tokens_generated)
-        txt = self.tokenizer.decode(self.start_tokens + tokens_generated)
+        return self.tokenizer.decode(self.start_tokens + tokens_generated)
+    def on_epoch_end(self, epoch, logs=None):
+        txt = self.generate()
         print(f"\ngenerated text:\n{txt}\n")
 
         if self.file:
-            with open(self.file, "a") as f:
+            with codecs.open(self.file, "a", "utf-8") as f:
                 f.write(txt + "\n")
 
 
 
-model = create_model()
-text_gen_callback = TextGenerator(maxlen, 50, "And then he said ", file=model_folder + "/generated_samples.txt")
+model = create_model(hparams)
+text_gen_callback = TextGenerator(hparams["maxlen"], 80, "", file=model_folder + "/generated_samples.txt")
 
 
 checkpoint_path = f"models/{model_name}/ckpt.ckpt"
 
+if Path(checkpoint_path + ".index").exists():
+    print("loading existing model")
+    model.load_weights(checkpoint_path)
+
 cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
                                                  save_weights_only=True,
                                                  verbose=1)
-epochs = 25
+epochs = 50
 
 for epoch in range(1, epochs + 1):
     print("epoch: " , epoch)
-    X_test, Y_test, X_train, Y_train = prepare_data.getTestTrain(maxlen, 0.05)
+    X_test, Y_test, X_train, Y_train = prepare_data.getTestTrain(hparams["maxlen"], 0.05)
     model.fit(X_train[:50*batch_size], Y_train[:50*batch_size], verbose=1, epochs=1, batch_size=batch_size, callbacks=[text_gen_callback, cp_callback])
