@@ -82,23 +82,7 @@ class TokenAndPositionEmbedding(layers.Layer):
         x = self.token_emb(x)
         return x + positions
 
-hparams = {
-    "vocab_size": 50257, # from tokenizer  
-    "maxlen" : 80,  # Max sequence size
-    "embed_dim" : 256,  # Embedding size for each token
-    "num_heads" : 2,  # Number of attention heads
-    "num_layers": 2,
-    "feed_forward_dim": 256  # Hidden layer size in feed forward network inside transformer
-}
 
-batch_size = 128
-
-
-model_name = f"test_h{hparams['num_heads']}l{hparams['num_layers']}emb{hparams['embed_dim']}"
-model_folder = "models/" + model_name
-Path(model_folder).mkdir(parents=True, exist_ok=True)
-with codecs.open (model_folder + "/params.json", "w", "utf-8") as f:
-    f.write(json.dumps(hparams))
 
 def create_model(hparams):
     vocab_size = hparams["vocab_size"]
@@ -194,22 +178,40 @@ class TextGenerator(keras.callbacks.Callback):
 
 
 
-model = create_model(hparams)
-text_gen_callback = TextGenerator(hparams["maxlen"], 80, "", file=model_folder + "/generated_samples.txt")
+if __name__ == "__main__":
+    hparams = {
+        "vocab_size": 50257, # from tokenizer  
+        "maxlen" : 80,  # Max sequence size
+        "embed_dim" : 256,  # Embedding size for each token
+        "num_heads" : 2,  # Number of attention heads
+        "num_layers": 2,
+        "feed_forward_dim": 256  # Hidden layer size in feed forward network inside transformer
+    }
+
+    batch_size = 128
 
 
-checkpoint_path = f"models/{model_name}/ckpt.ckpt"
+    model_name = f"test_h{hparams['num_heads']}l{hparams['num_layers']}emb{hparams['embed_dim']}"
+    model_folder = "models/" + model_name
+    Path(model_folder).mkdir(parents=True, exist_ok=True)
+    with codecs.open (model_folder + "/params.json", "w", "utf-8") as f:
+        f.write(json.dumps(hparams))
+    model = create_model(hparams)
+    text_gen_callback = TextGenerator(hparams["maxlen"], 80, "", file=model_folder + "/generated_samples.txt")
 
-if Path(checkpoint_path + ".index").exists():
-    print("loading existing model")
-    model.load_weights(checkpoint_path)
 
-cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
-                                                 save_weights_only=True,
-                                                 verbose=1)
-epochs = 50
+    checkpoint_path = f"models/{model_name}/ckpt.ckpt"
 
-for epoch in range(1, epochs + 1):
-    print("epoch: " , epoch)
-    X_test, Y_test, X_train, Y_train = prepare_data.getTestTrain(hparams["maxlen"], 0.05)
-    model.fit(X_train[:50*batch_size], Y_train[:50*batch_size], verbose=1, epochs=1, batch_size=batch_size, callbacks=[text_gen_callback, cp_callback])
+    if Path(checkpoint_path + ".index").exists():
+        print("loading existing model")
+        model.load_weights(checkpoint_path)
+
+    cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
+                                                    save_weights_only=True,
+                                                    verbose=1)
+    epochs = 50
+
+    for epoch in range(1, epochs + 1):
+        print("epoch: " , epoch)
+        X_test, Y_test, X_train, Y_train = prepare_data.getTestTrain(hparams["maxlen"], 0.05)
+        model.fit(X_train[:50*batch_size], Y_train[:50*batch_size], verbose=1, epochs=1, batch_size=batch_size, callbacks=[text_gen_callback, cp_callback])
