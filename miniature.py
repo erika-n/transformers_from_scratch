@@ -31,22 +31,25 @@ class MyMultiHeadAttention(layers.Layer):
         k = self.split_heads(self.wk(x))
         v = self.split_heads(self.wv(x))
 
-        self.w = (tf.matmul(q, tf.transpose(k, perm=[0, 1, 3, 2])))/math.sqrt(int(self.embedding_dim/self.num_heads)) # w dim: [batch_size, heads, input_length, input_length]
+        w = (tf.matmul(q, tf.transpose(k, perm=[0, 1, 3, 2])))/math.sqrt(int(self.embedding_dim/self.num_heads)) # w dim: [batch_size, heads, input_length, input_length]
     
         # masked attention
         if use_causal_mask:
             mask = tf.experimental.numpy.triu(tf.ones((1, 1, x.shape[1], x.shape[1])), 1)*-10.0e10
-            self.w = self.w + mask
-        self.w = tf.nn.softmax(self.w)
+            w = w + mask
+        w = tf.nn.softmax(w)
+        self.w = w
 
-        self.z = self.w @ v
+        z = w @ v
     
-        self.z = tf.reshape(self.z, (-1, x.shape[1], self.embedding_dim))
-        self.z = self.ff(self.z + x)
-        return self.z
+ 
+        z = tf.reshape(z, (-1, x.shape[1], self.embedding_dim))
+        z = self.ff(z + x)
+        self.z =-z
+        return z
 
-
-
+    def getW(self):
+        return self.w
 
 class TransformerBlock(layers.Layer):
     def __init__(self, embed_dim, num_heads, ff_dim, rate=0.1):
@@ -67,7 +70,8 @@ class TransformerBlock(layers.Layer):
         ffn_output = self.ffn(out1)
         ffn_output = self.dropout2(ffn_output)
         return self.layernorm2(out1 + ffn_output)
-        return attention_output
+
+
 
 class TokenAndPositionEmbedding(layers.Layer):
     def __init__(self, maxlen, vocab_size, embed_dim):
@@ -82,31 +86,25 @@ class TokenAndPositionEmbedding(layers.Layer):
         x = self.token_emb(x)
         return x + positions
 
+class TransformerModel(tf.keras.Model):
 
+    def __init__(self, hparams):
+        super().__init__()
+        vocab_size = hparams["vocab_size"]
+        maxlen = hparams["maxlen"]
+        embed_dim = hparams["embed_dim"]
+        num_heads = hparams["num_heads"]
+        num_layers = hparams["num_layers"]
+        feed_forward_dim = hparams["feed_forward_dim"]
+        self.embedding = TokenAndPositionEmbedding(maxlen, vocab_size, embed_dim)
+        self.transformers = keras.Sequential([TransformerBlock(embed_dim, num_heads, feed_forward_dim) for _ in range(num_layers)])
+        self.out = layers.Dense(vocab_size)
 
-def create_model(hparams):
-    vocab_size = hparams["vocab_size"]
-    maxlen = hparams["maxlen"]
-    embed_dim = hparams["embed_dim"]
-    num_heads = hparams["num_heads"]
-    num_layers = hparams["num_layers"]
-    feed_forward_dim = hparams["feed_forward_dim"]
-
-
-    inputs = layers.Input(shape=(maxlen,), dtype=tf.int32)
-    embedding_layer = TokenAndPositionEmbedding(maxlen, vocab_size, embed_dim)
-    x = embedding_layer(inputs)
-    transformer_blocks = keras.Sequential([TransformerBlock(embed_dim, num_heads, feed_forward_dim) for _ in range(num_layers)])
-    x = transformer_blocks(x)
-    outputs = layers.Dense(vocab_size)(x)
-    model = keras.Model(inputs=inputs, outputs=[outputs])
-    loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
-    model.compile(
-        "adam", loss=[loss_fn, None],
-    )  # No loss and optimization based on word embeddings from transformer block
-    return model
-
-
+    def call(self, x):
+        x = self.embedding(x)
+        x = self.transformers(x)
+        x = self.out(x)
+        return x
 
 
 
@@ -191,12 +189,23 @@ if __name__ == "__main__":
     batch_size = 128
 
 
-    model_name = f"test_h{hparams['num_heads']}l{hparams['num_layers']}emb{hparams['embed_dim']}"
+    model_name = f"transformer_h{hparams['num_heads']}l{hparams['num_layers']}emb{hparams['embed_dim']}"
     model_folder = "models/" + model_name
     Path(model_folder).mkdir(parents=True, exist_ok=True)
     with codecs.open (model_folder + "/params.json", "w", "utf-8") as f:
         f.write(json.dumps(hparams))
-    model = create_model(hparams)
+    model = TransformerModel(hparams)
+
+    loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+    model.compile(
+        "adam", loss=[loss_fn, None],
+    )  
+    X_test, _, _, _ = prepare_data.getTestTrain(hparams["maxlen"], 0.05)
+    pred_test = model(X_test[:10])
+    print("pred_test shape", pred_test.shape)
+    print(model.summary())
+
+
     text_gen_callback = TextGenerator(hparams["maxlen"], 80, "", file=model_folder + "/generated_samples.txt")
 
 
