@@ -10,14 +10,15 @@ import json
 import codecs
 
 class MyMultiHeadAttention(layers.Layer):
-    def __init__(self, num_heads, key_dim):
+    def __init__(self, num_heads, embedding_dim):
         super().__init__()
-        self.embedding_dim = key_dim
+        self.embedding_dim = embedding_dim
+        self.num_heads = num_heads
         self.wq = layers.Dense(self.embedding_dim)
         self.wk = layers.Dense(self.embedding_dim)
         self.wv = layers.Dense(self.embedding_dim)
-        self.ff = layers.Dense(self.embedding_dim)
-        self.num_heads = num_heads
+        self.ff = [layers.Dense(self.embedding_dim) for _ in range(num_heads)]
+        #self.out = layers.Dense(self.embedding_dim)
         self.w = None
         self.z = None
  
@@ -25,9 +26,9 @@ class MyMultiHeadAttention(layers.Layer):
 
         return tf.reshape(e, (-1, self.num_heads, e.shape[1], int(self.embedding_dim/self.num_heads)))
     
-    def call(self, x, _, use_causal_mask=False): #x dim: [batch_size, input_length, vocab_size]
+    def call(self, x, _, use_causal_mask=False, use_head = None): #x dim: [batch_size, input_length, embed_size]
 
-        q = self.split_heads(self.wq(x)) #q, k, v dim: [batch_size, heads, input_length, dk*heads]
+        q = self.split_heads(self.wq(x)) #q, k, v dim: [batch_size, heads, input_length, embed_size/heads]
         k = self.split_heads(self.wk(x))
         v = self.split_heads(self.wv(x))
 
@@ -38,15 +39,28 @@ class MyMultiHeadAttention(layers.Layer):
             mask = tf.experimental.numpy.triu(tf.ones((1, 1, x.shape[1], x.shape[1])), 1)*-10.0e10
             w = w + mask
         w = tf.nn.softmax(w)
-        self.w = w
+        self.w = w # w dim: [batch_size, heads, input_length, input_length]
 
-        z = w @ v
-    
- 
-        z = tf.reshape(z, (-1, x.shape[1], self.embedding_dim))
-        z = self.ff(z + x)
-        self.z =-z
-        return z
+        z = w @ v # z dim: [batch_size, heads, input_length, embed_size/heads]
+
+        out = x
+        use_head = 0
+        if use_head is not None:
+            r = [use_head]
+        else:
+            r = range(self.num_heads)
+        for i in r:
+            ff = self.ff[i]
+            result = ff(tf.squeeze(z[:, i, :, :]))
+
+            out += result
+        
+
+        #out = tf.reshape(out, (-1, x.shape[1], self.embedding_dim))    
+
+        # z = self.out(z + x)
+        # self.z = z
+        return out
 
     def getW(self):
         return self.w
@@ -63,8 +77,8 @@ class TransformerBlock(layers.Layer):
         self.dropout1 = layers.Dropout(rate)
         self.dropout2 = layers.Dropout(rate)
 
-    def call(self, inputs):
-        attention_output = self.att(inputs, inputs, use_causal_mask=True)
+    def call(self, inputs, use_head = None):
+        attention_output = self.att(inputs, inputs, use_causal_mask=True, use_head=use_head)
         attention_output = self.dropout1(attention_output)
         out1 = self.layernorm1(inputs + attention_output)
         ffn_output = self.ffn(out1)
@@ -100,9 +114,13 @@ class TransformerModel(tf.keras.Model):
         self.transformers = keras.Sequential([TransformerBlock(embed_dim, num_heads, feed_forward_dim) for _ in range(num_layers)])
         self.out = layers.Dense(vocab_size)
 
-    def call(self, x):
+    def call(self, x, use_layer = None, use_head = None):
         x = self.embedding(x)
-        x = self.transformers(x)
+        if use_layer is not None:
+            x = self.transformers.layers[use_layer](x, use_head = use_head)
+        
+        else:
+          x = self.transformers(x)
         x = self.out(x)
         return x
 
@@ -160,7 +178,7 @@ class TextGenerator(keras.callbacks.Callback):
             else:
                 x = start_tokens
             x = np.array([x])
-            y = self.model.predict(x, verbose=0)
+            y = self.model(x)
             sample_token = self.sample_from(y[0][sample_index])
             tokens_generated.append(sample_token)
             start_tokens.append(sample_token)
@@ -179,10 +197,10 @@ class TextGenerator(keras.callbacks.Callback):
 if __name__ == "__main__":
     hparams = {
         "vocab_size": 50257, # from tokenizer  
-        "maxlen" : 80,  # Max sequence size
-        "embed_dim" : 256,  # Embedding size for each token
-        "num_heads" : 2,  # Number of attention heads
-        "num_layers": 2,
+        "maxlen" : 40,  # Max sequence size
+        "embed_dim" : 512,  # Embedding size for each token
+        "num_heads" : 4,  # Number of attention heads
+        "num_layers": 1,
         "feed_forward_dim": 256  # Hidden layer size in feed forward network inside transformer
     }
 
@@ -206,12 +224,14 @@ if __name__ == "__main__":
     print(model.summary())
 
 
-    text_gen_callback = TextGenerator(hparams["maxlen"], 80, "", file=model_folder + "/generated_samples.txt")
+    text_gen_callback = TextGenerator(hparams["maxlen"], 40, "And she said", file=model_folder + "/generated_samples.txt")
 
 
     checkpoint_path = f"models/{model_name}/ckpt.ckpt"
 
-    if Path(checkpoint_path + ".index").exists():
+    load_existing = False
+
+    if Path(checkpoint_path + ".index").exists() and load_existing:
         print("loading existing model")
         model.load_weights(checkpoint_path)
 
