@@ -9,66 +9,51 @@ from pathlib import Path
 import json
 import codecs
 
-class MyMultiHeadAttention(layers.Layer):
-    def __init__(self, num_heads, embedding_dim):
+class AttentionHead(layers.Layer):
+    def __init__(self, embed_dim, head_embed_dim):
         super().__init__()
-        self.embedding_dim = embedding_dim
-        self.num_heads = num_heads
-        self.wq = layers.Dense(self.embedding_dim)
-        self.wk = layers.Dense(self.embedding_dim)
-        self.wv = layers.Dense(self.embedding_dim)
-        self.ff = [layers.Dense(self.embedding_dim) for _ in range(num_heads)]
-        #self.out = layers.Dense(self.embedding_dim)
-        self.w = None
-        self.z = None
- 
-    def split_heads(self, e):
+        self.head_embed_dim = head_embed_dim
+        self.wq = layers.Dense(head_embed_dim)
+        self.wk = layers.Dense(head_embed_dim)
+        self.wv = layers.Dense(head_embed_dim)
+        self.ff = layers.Dense(embed_dim)
 
-        return tf.reshape(e, (-1, self.num_heads, e.shape[1], int(self.embedding_dim/self.num_heads)))
-    
-    def call(self, x, _, use_causal_mask=False, use_head = None): #x dim: [batch_size, input_length, embed_size]
 
-        q = self.split_heads(self.wq(x)) #q, k, v dim: [batch_size, heads, input_length, embed_size/heads]
-        k = self.split_heads(self.wk(x))
-        v = self.split_heads(self.wv(x))
+    def call(self, x, use_causal_mask=True):
+        q = self.wq(x) #q, k, v dim: [batch_size, input_length, embedding_dim]
+        k = self.wk(x)
+        v = self.wv(x)
 
-        w = (tf.matmul(q, tf.transpose(k, perm=[0, 1, 3, 2])))/math.sqrt(int(self.embedding_dim/self.num_heads)) # w dim: [batch_size, heads, input_length, input_length]
-    
-        # masked attention
+        w = (tf.matmul(q, tf.transpose(k, perm=[0, 2, 1])))/math.sqrt(int(self.head_embed_dim)) # w dim: [batch_size, input_length, input_length]
         if use_causal_mask:
-            mask = tf.experimental.numpy.triu(tf.ones((1, 1, x.shape[1], x.shape[1])), 1)*-10.0e10
+            mask = tf.experimental.numpy.triu(tf.ones((1, x.shape[1], x.shape[1])), 1)*-10.0e10
             w = w + mask
         w = tf.nn.softmax(w)
-        self.w = w # w dim: [batch_size, heads, input_length, input_length]
+        self.w = w
+        z = w @ v
+        z = self.ff(z)
+        return z + x
 
-        z = w @ v # z dim: [batch_size, heads, input_length, embed_size/heads]
-
-        out = x
-        use_head = 0
-        if use_head is not None:
-            r = [use_head]
+class AttentionLayer(layers.Layer):
+    def __init__(self, num_heads, embedding_dim):
+        super().__init__()
+        self.heads = [AttentionHead(embedding_dim, embedding_dim//num_heads) for _ in range(num_heads)]
+    
+    def call(self, x, _, use_causal_mask=True, use_head = None): #x dim: [batch_size, input_length, embed_size]
+     
+        if use_head:
+            x = self.heads[use_head](x)
         else:
-            r = range(self.num_heads)
-        for i in r:
-            ff = self.ff[i]
-            result = ff(tf.squeeze(z[:, i, :, :]))
+            for head in self.heads:
+                x = head(x)
+ 
+        return x
 
-            out += result
-        
-
-        #out = tf.reshape(out, (-1, x.shape[1], self.embedding_dim))    
-
-        # z = self.out(z + x)
-        # self.z = z
-        return out
-
-    def getW(self):
-        return self.w
 
 class TransformerBlock(layers.Layer):
     def __init__(self, embed_dim, num_heads, ff_dim, rate=0.1):
         super().__init__()
-        self.att = MyMultiHeadAttention(num_heads, embed_dim)
+        self.att = AttentionLayer(num_heads, embed_dim)
         self.ffn = keras.Sequential(
             [layers.Dense(ff_dim, activation="relu"), layers.Dense(embed_dim),]
         )
@@ -199,8 +184,8 @@ if __name__ == "__main__":
         "vocab_size": 50257, # from tokenizer  
         "maxlen" : 40,  # Max sequence size
         "embed_dim" : 512,  # Embedding size for each token
-        "num_heads" : 4,  # Number of attention heads
-        "num_layers": 1,
+        "num_heads" : 2,  # Number of attention heads
+        "num_layers": 2,
         "feed_forward_dim": 256  # Hidden layer size in feed forward network inside transformer
     }
 
@@ -224,12 +209,12 @@ if __name__ == "__main__":
     print(model.summary())
 
 
-    text_gen_callback = TextGenerator(hparams["maxlen"], 40, "And she said", file=model_folder + "/generated_samples.txt")
+    text_gen_callback = TextGenerator(hparams["maxlen"], 37, "And she said", file=model_folder + "/generated_samples.txt")
 
 
     checkpoint_path = f"models/{model_name}/ckpt.ckpt"
 
-    load_existing = False
+    load_existing = True
 
     if Path(checkpoint_path + ".index").exists() and load_existing:
         print("loading existing model")
