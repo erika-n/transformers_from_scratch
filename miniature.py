@@ -116,12 +116,12 @@ class TransformerModel(tf.keras.Model):
         x = self.embedding(x)
 
         if use_layer is None:
-            max_layer = len(self.blocks)
+            for block in self.blocks:
+                x = block(x) 
         else:
-            max_layer = use_layer + 1
-
-        for i in range(max_layer):
-            x = self.blocks[i](x, use_head=use_head, values_only=values_only)
+            for i in range(use_layer):
+                x = self.blocks[i](x) # previous layers as usual
+            x = self.blocks[use_layer](x, use_head=use_head, values_only=values_only) #use chosen head on last layer
 
         x = self.layernorm(x)
         x = self.out(x)
