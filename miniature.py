@@ -8,19 +8,19 @@ import math
 from pathlib import Path
 import json
 import codecs
+import argparse
+
 
 class AttentionHead(layers.Layer):
-    def __init__(self, embed_dim, head_embed_dim):
+    def __init__(self, embed_dim, head_embed_dim, rate=0.5):
         super().__init__()
         self.head_embed_dim = head_embed_dim
         self.wq = layers.Dense(head_embed_dim)
         self.wk = layers.Dense(head_embed_dim)
         self.wv = layers.Dense(head_embed_dim)
-        self.ff = layers.Dense(embed_dim)
 
-
-    def call(self, x, use_causal_mask=True):
-        q = self.wq(x) #q, k, v dim: [batch_size, input_length, embedding_dim]
+    def call(self, x, use_causal_mask=True, values_only=False):
+        q = self.wq(x) #q, k, v dim: [batch_size, input_length, head_embedding_dim]
         k = self.wk(x)
         v = self.wv(x)
 
@@ -29,46 +29,58 @@ class AttentionHead(layers.Layer):
             mask = tf.experimental.numpy.triu(tf.ones((1, x.shape[1], x.shape[1])), 1)*-10.0e10
             w = w + mask
         w = tf.nn.softmax(w)
+
+
+        if values_only:
+            w = tf.eye(x.shape[1], batch_shape=[x.shape[0]])
+            #w = tf.zeros(w.shape)
         self.w = w
-        z = w @ v
-        z = self.ff(z)
-        return z + x
+        z = tf.matmul(w, v)
+        return z #z: [batch_size, input_length, head_embedding_dim]
 
 class AttentionLayer(layers.Layer):
-    def __init__(self, num_heads, embedding_dim):
+    def __init__(self, num_heads, embedding_dim, rate=0.5):
         super().__init__()
-        self.heads = [AttentionHead(embedding_dim, embedding_dim//num_heads) for _ in range(num_heads)]
-    
-    def call(self, x, _, use_causal_mask=True, use_head = None): #x dim: [batch_size, input_length, embed_size]
-     
-        if use_head:
-            x = self.heads[use_head](x)
-        else:
-            for head in self.heads:
-                x = head(x)
- 
-        return x
+
+        self.head_embedding_dim = embedding_dim//num_heads
+        self.heads = [AttentionHead(embedding_dim, self.head_embedding_dim) for _ in range(num_heads)]
+        self.ff = layers.Dense(embedding_dim, activation="gelu")
+        self.dropout = layers.Dropout(rate)
+
+    def call(self, x, use_causal_mask=True, use_head = None, values_only=False): #x dim: [batch_size, input_length, embed_size]
+
+
+        outputs = tf.zeros((x.shape[0], x.shape[1], self.head_embedding_dim))
+        if use_head is not None:
+            outputs += self.heads[use_head](x)
+        for head in self.heads:
+            outputs += head(x, values_only=values_only)
+
+        outputs = self.ff(outputs)
+        outputs = self.dropout(outputs)
+
+        return outputs
 
 
 class TransformerBlock(layers.Layer):
-    def __init__(self, embed_dim, num_heads, ff_dim, rate=0.1):
+    def __init__(self, embed_dim, num_heads, ff_dim, rate=0.5):
         super().__init__()
         self.att = AttentionLayer(num_heads, embed_dim)
         self.ffn = keras.Sequential(
-            [layers.Dense(ff_dim, activation="relu"), layers.Dense(embed_dim),]
+            [layers.Dense(ff_dim, activation="gelu"), layers.Dense(embed_dim),]
         )
-        self.layernorm1 = layers.LayerNormalization(epsilon=1e-6)
-        self.layernorm2 = layers.LayerNormalization(epsilon=1e-6)
-        self.dropout1 = layers.Dropout(rate)
-        self.dropout2 = layers.Dropout(rate)
+        self.layernorm1 = layers.LayerNormalization(epsilon=1e-6, scale=True, center=True)
+        self.layernorm2 = layers.LayerNormalization(epsilon=1e-6, scale=True, center=True)
 
-    def call(self, inputs, use_head = None):
-        attention_output = self.att(inputs, inputs, use_causal_mask=True, use_head=use_head)
-        attention_output = self.dropout1(attention_output)
-        out1 = self.layernorm1(inputs + attention_output)
-        ffn_output = self.ffn(out1)
-        ffn_output = self.dropout2(ffn_output)
-        return self.layernorm2(out1 + ffn_output)
+
+    def call(self, x, use_head = None, values_only=False):
+   
+        a = self.att(self.layernorm1(x), use_causal_mask=True, use_head=use_head, values_only=values_only)
+        x = x + a
+
+        m = self.ffn(self.layernorm2(x))
+        x = x + m
+        return x
 
 
 
@@ -96,16 +108,22 @@ class TransformerModel(tf.keras.Model):
         num_layers = hparams["num_layers"]
         feed_forward_dim = hparams["feed_forward_dim"]
         self.embedding = TokenAndPositionEmbedding(maxlen, vocab_size, embed_dim)
-        self.transformers = keras.Sequential([TransformerBlock(embed_dim, num_heads, feed_forward_dim) for _ in range(num_layers)])
+        self.blocks = [TransformerBlock(embed_dim, num_heads, feed_forward_dim) for _ in range(num_layers)]
         self.out = layers.Dense(vocab_size)
+        self.layernorm = layers.LayerNormalization(epsilon=1e-6, scale=True, center=True)
 
-    def call(self, x, use_layer = None, use_head = None):
+    def call(self, x, use_layer = None, use_head = None, values_only=False):
         x = self.embedding(x)
-        if use_layer is not None:
-            x = self.transformers.layers[use_layer](x, use_head = use_head)
-        
+
+        if use_layer is None:
+            max_layer = len(self.blocks)
         else:
-          x = self.transformers(x)
+            max_layer = use_layer + 1
+
+        for i in range(max_layer):
+            x = self.blocks[i](x, use_head=use_head, values_only=values_only)
+
+        x = self.layernorm(x)
         x = self.out(x)
         return x
 
@@ -180,13 +198,19 @@ class TextGenerator(keras.callbacks.Callback):
 
 
 if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser("simple_example")
+    parser.add_argument("--start_over", help="Clear model and start over", action='store_const', default=False, const=True)
+    args = parser.parse_args()
+
+
     hparams = {
         "vocab_size": 50257, # from tokenizer  
-        "maxlen" : 40,  # Max sequence size
-        "embed_dim" : 512,  # Embedding size for each token
-        "num_heads" : 2,  # Number of attention heads
-        "num_layers": 2,
-        "feed_forward_dim": 256  # Hidden layer size in feed forward network inside transformer
+        "maxlen" : 32,  # Max sequence size
+        "embed_dim" : 768,  # Embedding size for each token
+        "num_heads" : 12,  # Number of attention heads
+        "num_layers": 12,
+        "feed_forward_dim": 1024  # Hidden layer size in feed forward network inside transformer
     }
 
     batch_size = 128
@@ -200,8 +224,14 @@ if __name__ == "__main__":
     model = TransformerModel(hparams)
 
     loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+
+    lr_schedule = keras.optimizers.schedules.ExponentialDecay(
+        initial_learning_rate=1e-2,
+        decay_steps=300,
+        decay_rate=0.96)
+    optimizer = keras.optimizers.Adam(learning_rate=lr_schedule)
     model.compile(
-        "adam", loss=[loss_fn, None],
+        optimizer, loss=[loss_fn, None],
     )  
     X_test, _, _, _ = prepare_data.getTestTrain(hparams["maxlen"], 0.05)
     pred_test = model(X_test[:10])
@@ -209,21 +239,21 @@ if __name__ == "__main__":
     print(model.summary())
 
 
-    text_gen_callback = TextGenerator(hparams["maxlen"], 37, "And she said", file=model_folder + "/generated_samples.txt")
+    text_gen_callback = TextGenerator(hparams["maxlen"], 28, "And she said", file=model_folder + "/generated_samples.txt")
 
 
     checkpoint_path = f"models/{model_name}/ckpt.ckpt"
 
-    load_existing = True
+    start_over = args.start_over
 
-    if Path(checkpoint_path + ".index").exists() and load_existing:
+    if Path(checkpoint_path + ".index").exists() and (not start_over):
         print("loading existing model")
         model.load_weights(checkpoint_path)
 
     cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
                                                     save_weights_only=True,
                                                     verbose=1)
-    epochs = 50
+    epochs = 200
 
     for epoch in range(1, epochs + 1):
         print("epoch: " , epoch)
