@@ -9,16 +9,20 @@ from pathlib import Path
 import json
 import codecs
 import argparse
-
+import wandb
+from wandb.keras import WandbMetricsLogger
+import random
 
 class AttentionHead(layers.Layer):
     def __init__(self, embed_dim, head_embed_dim, rate=0.5):
         super().__init__()
         self.head_embed_dim = head_embed_dim
-        self.wq = layers.Dense(head_embed_dim)
-        self.wk = layers.Dense(head_embed_dim)
-        self.wv = layers.Dense(head_embed_dim)
-
+        initializer = tf.keras.initializers.HeNormal(seed=random.seed())
+        self.wq = layers.Dense(head_embed_dim, kernel_initializer=initializer)
+        self.wk = layers.Dense(head_embed_dim, kernel_initializer=initializer)
+        self.wv = layers.Dense(head_embed_dim, kernel_initializer=initializer)
+        self.wo = layers.Dense(embed_dim, kernel_initializer=initializer)
+        
     def call(self, x, use_causal_mask=True, values_only=False):
         q = self.wq(x) #q, k, v dim: [batch_size, input_length, head_embedding_dim]
         k = self.wk(x)
@@ -36,27 +40,27 @@ class AttentionHead(layers.Layer):
             #w = tf.zeros(w.shape)
         self.w = w
         z = tf.matmul(w, v)
-        return z #z: [batch_size, input_length, head_embedding_dim]
+        z = self.wo(z)
+        return z #z: [batch_size, input_length, embedding_dim]
 
 class AttentionLayer(layers.Layer):
     def __init__(self, num_heads, embedding_dim, rate=0.5):
         super().__init__()
 
         self.head_embedding_dim = embedding_dim//num_heads
+        self.embedding_dim = embedding_dim
         self.heads = [AttentionHead(embedding_dim, self.head_embedding_dim) for _ in range(num_heads)]
-        self.ff = layers.Dense(embedding_dim, activation="gelu")
         self.dropout = layers.Dropout(rate)
 
     def call(self, x, use_causal_mask=True, use_head = None, values_only=False): #x dim: [batch_size, input_length, embed_size]
 
 
-        outputs = tf.zeros((x.shape[0], x.shape[1], self.head_embedding_dim))
+        outputs = tf.zeros((x.shape[0], x.shape[1], self.embedding_dim))
         if use_head is not None:
             outputs += self.heads[use_head](x)
         for head in self.heads:
             outputs += head(x, values_only=values_only)
 
-        outputs = self.ff(outputs)
         outputs = self.dropout(outputs)
 
         return outputs
@@ -66,8 +70,9 @@ class TransformerBlock(layers.Layer):
     def __init__(self, embed_dim, num_heads, ff_dim, rate=0.5):
         super().__init__()
         self.att = AttentionLayer(num_heads, embed_dim)
+        initializer = tf.keras.initializers.HeNormal(seed=random.seed())
         self.ffn = keras.Sequential(
-            [layers.Dense(ff_dim, activation="gelu"), layers.Dense(embed_dim),]
+            [layers.Dense(ff_dim, activation="gelu",kernel_initializer=initializer), layers.Dense(embed_dim,kernel_initializer=initializer),]
         )
         self.layernorm1 = layers.LayerNormalization(epsilon=1e-6, scale=True, center=True)
         self.layernorm2 = layers.LayerNormalization(epsilon=1e-6, scale=True, center=True)
@@ -109,7 +114,8 @@ class TransformerModel(tf.keras.Model):
         feed_forward_dim = hparams["feed_forward_dim"]
         self.embedding = TokenAndPositionEmbedding(maxlen, vocab_size, embed_dim)
         self.blocks = [TransformerBlock(embed_dim, num_heads, feed_forward_dim) for _ in range(num_layers)]
-        self.out = layers.Dense(vocab_size)
+        initializer = tf.keras.initializers.HeNormal(seed=random.seed())
+        self.out = layers.Dense(vocab_size,kernel_initializer=initializer)
         self.layernorm = layers.LayerNormalization(epsilon=1e-6, scale=True, center=True)
 
     def call(self, x, use_layer = None, use_head = None, values_only=False):
@@ -132,18 +138,6 @@ class TransformerModel(tf.keras.Model):
 
 
 class TextGenerator(keras.callbacks.Callback):
-    """A callback to generate text from a trained model.
-    1. Feed some starting prompt to the model
-    2. Predict probabilities for the next token
-    3. Sample the next token and add it to the next input
-
-    Arguments:
-        max_tokens: Integer, the number of tokens to be generated after prompt.
-        start_tokens: List of integers, the token indices for the starting prompt.
-        index_to_word: List of strings, obtained from the TextVectorization layer.
-        top_k: Integer, sample from the `top_k` token predictions.
-        print_every: Integer, print after this many epochs.
-    """
 
     def __init__(
         self, input_length, max_tokens, start_prompt, file = None, top_k=10, print_every=1
@@ -166,8 +160,7 @@ class TextGenerator(keras.callbacks.Callback):
 
     def generate(self):
         start_tokens = [_ for _ in self.start_tokens]
-        if (epoch + 1) % self.print_every != 0:
-            return
+
         num_tokens_generated = 0
         tokens_generated = []
         while num_tokens_generated <= self.max_tokens:
@@ -208,12 +201,16 @@ if __name__ == "__main__":
         "vocab_size": 50257, # from tokenizer  
         "maxlen" : 32,  # Max sequence size
         "embed_dim" : 768,  # Embedding size for each token
-        "num_heads" : 12,  # Number of attention heads
-        "num_layers": 12,
+        "num_heads" : 4,  # Number of attention heads
+        "num_layers": 2,
         "feed_forward_dim": 1024  # Hidden layer size in feed forward network inside transformer
     }
 
-    batch_size = 128
+    wandb.login()
+    wandb.init(project="tfs", config=hparams)
+
+
+    batch_size = 256
 
 
     model_name = f"transformer_h{hparams['num_heads']}l{hparams['num_layers']}emb{hparams['embed_dim']}"
@@ -226,9 +223,9 @@ if __name__ == "__main__":
     loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
     lr_schedule = keras.optimizers.schedules.ExponentialDecay(
-        initial_learning_rate=1e-2,
-        decay_steps=300,
-        decay_rate=0.96)
+        initial_learning_rate=0.00002,
+        decay_steps=50,
+        decay_rate=0.99)
     optimizer = keras.optimizers.Adam(learning_rate=lr_schedule)
     model.compile(
         optimizer, loss=[loss_fn, None],
@@ -255,7 +252,9 @@ if __name__ == "__main__":
                                                     verbose=1)
     epochs = 200
 
-    for epoch in range(1, epochs + 1):
-        print("epoch: " , epoch)
-        X_test, Y_test, X_train, Y_train = prepare_data.getTestTrain(hparams["maxlen"], 0.05)
-        model.fit(X_train[:50*batch_size], Y_train[:50*batch_size], verbose=1, epochs=1, batch_size=batch_size, callbacks=[text_gen_callback, cp_callback])
+
+
+    X_test, Y_test, X_train, Y_train = prepare_data.getTestTrain(hparams["maxlen"], 0.05)
+    num = X_train.shape[0] // batch_size
+    print("num", num)
+    model.fit(X_train[:num*batch_size], Y_train[:num*batch_size], validation_data=(X_test[:batch_size], Y_test[:batch_size]), verbose=1, epochs=epochs, batch_size=batch_size, callbacks=[text_gen_callback, cp_callback, WandbMetricsLogger()], steps_per_epoch=20)
